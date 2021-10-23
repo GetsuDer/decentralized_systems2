@@ -1,10 +1,18 @@
 SRCDIR=src/
 MPICC=mpicc
 NPROC=10
-.PHONY: all clean mpi
+.PHONY: all clean mpi mpi_upgraded
 
-all: mpi
+all: mpi mpi_upgraded
+
+run_mpi: mpi
 	mpiexec -n $(NPROC) ./mpi
+
+run_mpi_upgraded: mpi_upgraded
+	mpiexec -n $(NPROC) --disable-auto-cleanup ./mpi_upgraded
+
+mpi_upgraded:
+	$(MPICC) $(SRCDIR)mpi_upgraded.c -o mpi_upgraded
 
 mpi: $(SRCDIR)mpi_code.c
 	$(MPICC) $(SRCDIR)mpi_code.c -o mpi
