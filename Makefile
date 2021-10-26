@@ -18,4 +18,4 @@ mpi: $(SRCDIR)mpi_code.c
 	$(MPICC) $(SRCDIR)mpi_code.c -o mpi
 
 clean:
-	rm -f mpi
+	rm -f mpi mpi_upgraded backup_*

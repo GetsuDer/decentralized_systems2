@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "mpi.h"
@@ -18,47 +19,80 @@ double   maxeps = 0.1e-7;
 int itmax = 100;
 int eps;
 
+struct env
+{
+	int ind_first; // first index to work with
+	int ind_last; // last index to work with
+	int prev_proc; // rank of process which gives previous values
+	int next_proc; // rank of process to which must give values
+	int rank; // rank of current process
+	int size; // number of existing processes
+	int it; // last successfull iteration
+	int *live_procs; // array of currently live processes
+};
+
+void
+fixing_all(struct env *env)
+{
+	printf("In fixing_all proc %d/%d on it %d\n", env->rank, env->size, env->it);
+	while (1)
+	{
+
+	}
+	return;
+}
+
 int main(int argc, char **argv)
 {
-    MPI_Errhandler errh; 
-    MPI_Init(&argc, &argv);
-
-    int rank;
-    int size;
+	srandom(time(NULL));
+    int bad_rank = random();
+	int bad_it = random() % itmax + 1;
+	
+	MPI_Init(&argc, &argv);
+	MPI_Comm_set_errhandler(MPI_COMM_WORLD, MPI_ERRORS_RETURN);
+	struct env e;
 	int rc;
 	int err_shift = 1;
 	int rearrange_buff[4];
+	MPI_Request request;
 
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &e.size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &e.rank);
 
-    if (size > N - 2) 
+	if (!(bad_rank % e.size))
 	{
-        size = N - 2;
+		bad_rank++;
+	}
+
+	if (!e.rank) 
+		printf("bad_it %d bad_rank %... %d\n", bad_it, bad_rank % e.size); 
+    if (e.size > N - 2) 
+	{
+        e.size = N - 2;
     }
 
-	if( rank == (size - 1)) 
+    if (e.rank < e.size) 
 	{
-		exit(1);
-	//	raise(SIGKILL);
-	//	printf("in bad proc, rank %d\n", rank);
-	}
-    if (rank < size) 
-	{
-	    int part_size = (N - 2) / size;
-	    int ind_first = part_size * rank, ind_last = ind_first + part_size;
-		int prev = rank? rank - 1 : size - 1;
-		int next = (rank == size - 1) ? 0 : rank + 1;
-    	if (rank == size - 1) 
+		e.live_procs = (int *)calloc(e.size, sizeof(int));
+		for (int i = 0; i < e.size; i++)
+		{
+			e.live_procs[i] = 1;
+		}
+	    int part_size = (N - 2) / e.size;
+	    e.ind_first = part_size * e.rank;
+	    e.ind_last = e.ind_first + part_size;
+		e.prev_proc = e.rank? e.rank - 1 : e.size - 1;
+		e.next_proc = (e.rank == e.size - 1) ? 0 : e.rank + 1;
+    	if (e.rank == e.size - 1) 
 		{ //last process
-        	ind_last = N - 2;
+        	e.ind_last = N - 2;
     	} 
     	int *eps_achieved = NULL; // necessary only for zero process 
 
-    	double *matrix = (double *)calloc(N * N * (ind_last - ind_first + 2), sizeof(double));
+    	double *matrix = (double *)calloc(N * N * (e.ind_last - e.ind_first + 2), sizeof(double));
     	matrix += N * N;
     	int ind1, ind2, ind3;
-    	for (ind1 = 0; ind1 < ind_last - ind_first; ind1++) 
+    	for (ind1 = 0; ind1 < e.ind_last - e.ind_first; ind1++) 
 		{
         	for (ind2 = 0; ind2 <= N - 1; ind2++) 
 			{
@@ -67,7 +101,7 @@ int main(int argc, char **argv)
                 	if (ind2 == 0 || ind3 == 0 || ind3 == N - 1 || ind2 == N - 1 ) {
                     	*(matrix + ind1 * N * N + ind2 * N + ind3) = 0;
    					} else {
-   						*(matrix + ind1 * N * N + ind2 * N + ind3) = 4. + (ind_first + ind1 + 1) + ind2 + ind3; 
+   						*(matrix + ind1 * N * N + ind2 * N + ind3) = 4. + (e.ind_first + ind1 + 1) + ind2 + ind3; 
    					}
    				}
    			}
@@ -76,62 +110,74 @@ int main(int argc, char **argv)
 	
 		MPI_Status status;
 //matrix initialized
-		if (rank != size - 1) 
+		if (e.rank != e.size - 1) 
 		{ //for last process next_values is always zero submatrix
         	for (ind2 = 0; ind2 <= N - 1; ind2++) 
 			{
             	for (ind3 = 0; ind3 <= N - 1; ind3++) 
 				{
                 	if (ind2 == 0 || ind3 == 0 || ind3 == N - 1 || ind2 == N - 1 ) {
-                    	*(matrix + N * N * (ind_last - ind_first)+ ind2 * N + ind3) = 0;
+                    	*(matrix + N * N * (e.ind_last - e.ind_first)+ ind2 * N + ind3) = 0;
                 	} else {
-                    	*(matrix + N * N * (ind_last - ind_first) + ind2 * N + ind3) = 4. + ind2 + ind3 + ind_last - ind_first;
+                    	*(matrix + N * N * (e.ind_last - e.ind_first) + ind2 * N + ind3) = 4. + ind2 + ind3 + e.ind_last - e.ind_first;
                 	}
             	}
         	}
     	}
 
-    	if (!rank) 
+    	if (!e.rank) 
 		{
-        	eps_achieved = (int *)calloc(size, sizeof(int));
+        	eps_achieved = (int *)calloc(e.size, sizeof(int));
     	}
-    	int it = 0;
-    	for (; it < itmax; it++) 
+		e.it = 0;
+    	for (; e.it < itmax;) 
 		{
+			if ((e.it == bad_it) && e.rank == (bad_rank % e.size))
+			{
+				// raise error
+				printf("On iteration %d process %d/%d decided to die.\n", e.it, e.rank, e.size);
+				exit(1);
+			}
+
         	int flag;
-        	if (!rank) 
+        	if (!e.rank) 
 			{
 // check, if have messages about eps achievement from other processes
-            	for (int process_id = 1; process_id < size; process_id++) 
+            	for (int process_id = 1; process_id < e.size; process_id++) 
 				{
+					if (!e.live_procs[process_id])
+					{
+						// this process is already dead, forget about it
+						continue;
+					}
                 	flag = 0;
                 	rc = MPI_Iprobe(process_id, EPS_TAG + itmax * err_shift, MPI_COMM_WORLD, &flag, &status);
 					if (rc != MPI_SUCCESS)
 					{
-						// it is possible, that other process has died.
-						// stop and start waiting for ressurrection call.
-						if (!rank)
-						{
-							// root process found, that something is wrong.
-							// now it should find correct it number, rearrange threads
-							// and sent them new info with tag RESTORE_TAG
-						}
-						else
-						{
-							// not root process must wait for message with RESTORE_TAG
-							MPI_Recv(&rearrange_buff, MPI_INT, 0, RESTORE_TAG + itmax * err_shift, MPI_COMM_WORLD, &status);
-						}
+						printf("Process %d on it %d recieved not OK 1\n", e.rank, e.it);
+						fixing_all(&e);
+						continue; // go to next iteration
 					}
+
                 	if (flag) {
                     	eps_achieved[process_id] = 1;
-                    	MPI_Recv(&flag, 1, MPI_INT, process_id, EPS_TAG + itmax * err_shift, MPI_COMM_WORLD, &status); // take this
-                    //message from queue
+                    	rc = MPI_Recv(&flag, 1, MPI_INT, process_id, EPS_TAG + itmax * err_shift, 
+								MPI_COMM_WORLD, &status); 
+						// take this
+                    	//message from queue
+						if (rc != MPI_SUCCESS)
+						{
+							printf("Process %d on it %d recieved not OK 2\n", e.rank, e.it);
+							fixing_all(&e);
+							continue;
+						}
                 	} 
            	 	}
-            	flag = 1;
-            	for (int i = 0; i < size; i++) 
+            	
+				flag = 1;
+            	for (int i = 0; i < e.size; i++) 
 				{
-                	if (!eps_achieved[i]) 
+                	if (e.live_procs[i] && !eps_achieved[i]) 
 					{
                     	flag = 0;
                     	break;
@@ -139,37 +185,74 @@ int main(int argc, char **argv)
             	}
             	if (flag) 
 				{
-                	for (int i = 1; i < size; i++) 
-					{ 
-                    	MPI_Send(&flag, 1, MPI_INT, i, EPS_TAG + itmax * err_shift, MPI_COMM_WORLD);
+                	for (int i = 1; i < e.size; i++) 
+					{
+					   if (e.live_procs[i])
+					   { 
+						   rc = MPI_Isend(&flag, 1, MPI_INT, i,
+								   EPS_TAG + itmax * err_shift, MPI_COMM_WORLD, &request);
+						   if (rc != MPI_SUCCESS)
+						   {
+							   printf("Process %d on it %d recieved not OK 3\n", e.rank, e.it);
+   							   fixing_all(&e);
+   							   continue;
+						   }
+					   }
                 	}
             	}
         	} 
 			else 
 			{
-            	MPI_Iprobe(0, EPS_TAG + itmax * err_shift, MPI_COMM_WORLD, &flag, &status);
-            	if (flag) 
+            	rc = MPI_Iprobe(0, EPS_TAG + itmax * err_shift, MPI_COMM_WORLD, &flag, &status);
+				if (rc != MPI_SUCCESS)
 				{
-                	MPI_Recv(&flag, 1, MPI_INT, 0, EPS_TAG + itmax * err_shift, MPI_COMM_WORLD, &status);
+					printf("Process %d on it %d recieved not OK 4\n", e.rank, e.it);
+					fixing_all(&e);
+					continue;
+				}	
+				if (flag) 
+				{
+                	rc = MPI_Recv(&flag, 1, MPI_INT, 0, EPS_TAG + itmax * err_shift, MPI_COMM_WORLD, &status);
+					if (rc != MPI_SUCCESS)
+					{
+						printf("Process %d on it %d recieved not OK 4\n", e.rank, e.it);
+						fixing_all(&e);
+						continue;
+					}
                 	should_calculate = 0;
            	 	}
         	}
+
     // get values
-        	if (rank) 
+        	if (e.rank) 
 			{ // process zero does not recieves data from other processes here
             //on first iteration left values could be counted by process itself
-            	MPI_Recv(matrix - N * N, N * N, MPI_DOUBLE, rank - 1, it + itmax * (err_shift - 1), MPI_COMM_WORLD, &status);
+            	rc = MPI_Recv(matrix - N * N, N * N, MPI_DOUBLE, e.rank - 1, e.it + itmax * (err_shift - 1), 
+						MPI_COMM_WORLD, &status);
+				if (rc != MPI_SUCCESS)
+				{
+					printf("Process %d on it %d recieved not OK 5\n", e.rank, e.it);
+					fixing_all(&e);
+					continue;
+				}
         	}
-        	if (it && rank != size - 1) 
+        	if (e.it && e.rank != e.size - 1) 
 			{ // on first iteration next_values is already correct,
             //for last process next_values is ALWAYS correct
-            	MPI_Recv(matrix + N * N * (ind_last - ind_first), N * N, MPI_DOUBLE, rank + 1, it - 1 + itmax * (err_shift - 1), MPI_COMM_WORLD, &status);
+            	rc = MPI_Recv(matrix + N * N * (e.ind_last - e.ind_first), N * N, MPI_DOUBLE, 
+						e.next_proc, e.it - 1 + itmax * (err_shift - 1), MPI_COMM_WORLD, &status);
+				if (rc != MPI_SUCCESS)
+				{
+					printf("Process %d on it %d recieved not OK 6\n", e.rank, e.it);
+					fixing_all(&e);
+					continue;
+				}
         	}
         // process values
         	eps = 0;
         	if (should_calculate) 
 			{
-        		for (ind1 = 0; ind1 < ind_last - ind_first; ind1++) 
+        		for (ind1 = 0; ind1 < e.ind_last - e.ind_first; ind1++) 
 				{
             		for (ind2 = 1; ind2 < N - 1; ind2++) 
 					{
@@ -184,73 +267,108 @@ int main(int argc, char **argv)
 			}
 			// backup counted messages
 			char *filename = (char *)calloc(sizeof(char), 100);
-			snprintf(filename, 100, "backup_%d_%d", rank, it);
+			snprintf(filename, 100, "backup_%d_%d", e.rank, e.it);
 			int fd = open(filename, O_CREAT, S_IRWXU);
 		    if (!fd)
 			{
-				fprintf(stderr, "Process %d can not create and open file %s\n", rank, filename);
+				fprintf(stderr, "Process %d can not create and open file %s\n", e.rank, filename);
 				MPI_Abort(MPI_COMM_WORLD, MPI_ERR_FILE);
 			}	
 			free(filename);
-			write(fd, matrix, N * N * (ind_last - ind_first + 2) * sizeof(double));
+			write(fd, matrix, N * N * (e.ind_last - e.ind_first + 2) * sizeof(double));
 			close(fd);
 			// end of backup counted messages
 
-			if (rank != size - 1)
+			if (e.rank != e.size - 1)
 			{
-    	        MPI_Send(matrix + (ind_last - ind_first - 1) * N * N, N * N, MPI_DOUBLE, rank + 1, it + itmax * (err_shift - 1), MPI_COMM_WORLD);
-        	}
-        	if (rank && it != itmax - 1)
+    	        rc = MPI_Isend(matrix + (e.ind_last - e.ind_first - 1) * N * N, N * N, MPI_DOUBLE, e.next_proc, e.it + itmax * (err_shift - 1), MPI_COMM_WORLD, &request);
+				if (rc != MPI_SUCCESS)
+				{
+					printf("Process %d on it %d recieved not OK 7\n", e.rank, e.it);
+					fixing_all(&e);
+					continue;
+				}
+			}
+        	if (e.rank && e.it != itmax - 1)
 			{
-            	MPI_Send(matrix, N * N, MPI_DOUBLE, rank - 1, it + itmax * (err_shift - 1), MPI_COMM_WORLD);
-        	}
+            	rc = MPI_Isend(matrix, N * N, MPI_DOUBLE, e.prev_proc, e.it + itmax * (err_shift - 1), MPI_COMM_WORLD, &request);
+				if (rc != MPI_SUCCESS)
+				{
+					printf("Process %d on it %d recieved not OK 8\n", e.rank, e.it);
+					fixing_all(&e);
+					continue;
+				}				
+			}
         	if (should_calculate)
 			{
         		if (eps < maxeps)
 				{
             // notify zero process about this
-            		if (!rank)
+            		if (!e.rank)
 					{
                 		eps_achieved[0] = 1;
             		}
 				   	else
 					{
                 		int achieved = 1;
-                		MPI_Send(&achieved, 1, MPI_INT, 0, EPS_TAG + itmax * err_shift, MPI_COMM_WORLD);
+                		rc = MPI_Send(&achieved, 1, MPI_INT, 0, EPS_TAG + itmax * err_shift, MPI_COMM_WORLD);
+						if (rc != MPI_SUCCESS)
+						{
+							printf("Process %d on it %d recieved not OK 9\n", e.rank, e.it);
+							fixing_all(&e);
+							continue;
+						}
             		}
          		}
-
         	}
+			e.it++; // go to next iteration without problems
 		}
 //now we should sum all counted values and sent them to process 0
 //process 0 should sum all recieved values and print them
     
 	    double S = 0.;
-   	 	for (ind1 = 0; ind1 < ind_last - ind_first; ind1++)
+   	 	for (ind1 = 0; ind1 < e.ind_last - e.ind_first; ind1++)
 		{
         	for (ind2 = 1; ind2 < N - 1; ind2++)
 			{
             	for (ind3 = 1; ind3 < N - 1; ind3++)
 				{
-                	S += *(matrix + ind1 * N * N + ind2 * N + ind3) * (ind3 + 1) * (ind2 + 1) * (ind1 + ind_first + 2) / (N * N * N);
+                	S += *(matrix + ind1 * N * N + ind2 * N + ind3) * (ind3 + 1) * (ind2 + 1) * (ind1 + e.ind_first + 2) / (N * N * N);
             	}
         	}
     	}
-    	if (rank)
+    	if (e.rank)
 		{
-        	MPI_Send(&S, 1, MPI_DOUBLE, 0, END_TAG + itmax * err_shift, MPI_COMM_WORLD);
+        	rc = MPI_Send(&S, 1, MPI_DOUBLE, 0, END_TAG + itmax * err_shift, MPI_COMM_WORLD);
+			if (rc != MPI_SUCCESS)
+			{
+				printf("Process %d on it %d recieved not OK 10 NOT GOOD\n", e.rank, e.it);
+				//fixing_all(&e); // out of cycle, all bad?
+				//continue;
+			}
     	}
 
-    	if (!rank)
+    	if (!e.rank)
 		{
         	double S_tmp;
-        	for (ind1 = 1; ind1 < size; ind1++)
+        	for (ind1 = 1; ind1 < e.size; ind1++)
 			{
-            	MPI_Recv(&S_tmp, 1, MPI_DOUBLE, ind1, END_TAG + itmax * err_shift, MPI_COMM_WORLD, &status);
+				if (!e.live_procs[ind1])
+				{
+					continue;
+				}
+            	rc = MPI_Recv(&S_tmp, 1, MPI_DOUBLE, ind1, 
+						END_TAG + itmax * err_shift, MPI_COMM_WORLD, &status);
+				if (rc != MPI_SUCCESS)
+				{
+					printf("Process %d on it %d recieved not OK 11\n", e.rank, e.it);
+					fixing_all(&e);
+					continue;
+				}
             	S += S_tmp;
         	}
     	}
-    	if (!rank)
+    	if (!e.rank)
 		{
 			fprintf(stderr, "S = %lf\n", S);
     	}
