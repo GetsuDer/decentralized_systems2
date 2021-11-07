@@ -9,6 +9,7 @@ run_mpi: mpi
 	mpiexec -n $(NPROC) ./mpi
 
 run_mpi_upgraded: mpi_upgraded
+	rm -f backup_*
 	mpiexec -n $(NPROC) --disable-auto-cleanup ./mpi_upgraded
 
 mpi_upgraded:
