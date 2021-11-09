@@ -1,4 +1,5 @@
-SRCDIR=src/
+#SRCDIR=src/
+SRCDIR=.
 MPICC=mpicc
 NPROC=10
 .PHONY: all clean mpi mpi_upgraded
