@@ -12,9 +12,9 @@
 #define  Max(a,b) ((a)>(b)?(a):(b))
 
 #define  N   ((1 << 6) +2)
-#define RESTORE_TAG 1
-#define EPS_TAG 2
-#define END_TAG 3
+#define RESTORE_TAG 1001
+#define EPS_TAG 2001
+#define END_TAG 3001
 double   maxeps = 0.1e-7;
 int itmax = 100;
 int eps;
@@ -29,7 +29,7 @@ struct env
 	int size; // number of existing processes
 	int it; // last successfull iteration
 	int *alive_procs; // array of currently live processes
-	int err_shift; // value for tag shifting
+	int err_shift;
 	int reread_it; // value to reread iteration
 };
 
@@ -38,7 +38,7 @@ struct env
 // [1]: it ind
 // [2]: is_slave
 void
-fixing_all(struct env *env, int err, int *rearrange_buff)
+fixing_all(struct env *env, int *rearrange_buff, MPI_Request *prev_master_request)
 {
 	printf("In fixing_all proc %d/%d on it %d\n", env->rank, env->size, env->it);
 	int dead_proc = rearrange_buff[0];
@@ -48,7 +48,7 @@ fixing_all(struct env *env, int err, int *rearrange_buff)
 	if (!env->alive_procs[dead_proc])
 	{
 // повторное сообщение
-		printf("Proc %d recieved second message about death of %d", env->rank, dead_proc);
+		printf("%d recieved second message about death of %d", env->rank, dead_proc);
 		return;
 	}
 	env->alive_procs[dead_proc] = 0;
@@ -110,14 +110,16 @@ fixing_all(struct env *env, int err, int *rearrange_buff)
 	if (!is_slave)
 	{
 		if (i_am_prev) {
-			MPI_Recv(buff, 3, MPI_INT, MPI_ANY_SOURCE, RESTORE_TAG + itmax * env->err_shift, MPI_COMM_WORLD, &status);
-			env->reread_it = buff[1];
+			printf("%d as prev master waiting for restore message with tag %d\n", env->rank, RESTORE_TAG + itmax * env->err_shift);
+			MPI_Wait(prev_master_request, &status);
+			printf("%d as prev master got restore message\n", env->rank);
+			env->reread_it = rearrange_buff[1];
 			is_slave = 1;
 		}
 	}
   	int part_size = (N - 2) / live_number;
-	env->ind_last = new_rank * part_size; 
-	env->ind_first = env->ind_last + part_size;
+	env->ind_first = new_rank * part_size; 
+	env->ind_last = env->ind_last + part_size;
 	if (next_live < env->rank)
 	{ // last proc
 		env->ind_last = N - 2;
@@ -134,27 +136,28 @@ fixing_all(struct env *env, int err, int *rearrange_buff)
 	}
 	else
 	{
-		printf("Proc %d starting restoring.\n", env->rank);
+		printf("%d starting restoring.\n", env->rank);
 
 		int max_good_it = env->it - 1; // for this proc previous it is backuped for sure
 		for (int i = 0; i < env->size; i++)
 		{
 			if (env->alive_procs[i] && (i != env->rank))
 			{
-				for (; max_good_it > 0; max_good_it--)
+				int found = 0;
+				while (!found && (max_good_it > 0))
 				{
+					printf("%d checking proc %d for it %d\n", env->rank, i, max_good_it);
 					char *filename = (char *)calloc(100, sizeof(char));
 					snprintf(filename, 100, "backup_%d_%d", i, max_good_it);
 					if (!access(filename, F_OK)) // file exists
 					{
-						free(filename);
-						snprintf(filename, 100, "backup_%d_%d", i, max_good_it + 1);
-						if (access(filename, F_OK)) // file not exists
-						{
-							max_good_it--;
-						}
-						break;
+						found = 1;
 					}
+					else
+					{
+						max_good_it--;
+					}
+					printf("found=%d mgi = %d\n", found, max_good_it);
 				}
 			}
 		}
@@ -166,7 +169,7 @@ fixing_all(struct env *env, int err, int *rearrange_buff)
 		{
 			if (env->alive_procs[i] && (i != env->rank))
 			{
-				printf("%d sending restore message to %d\n", env->rank, i);
+				printf("%d sending restore message to %d with tag %d\n", env->rank, i, RESTORE_TAG + itmax * env->err_shift);
 				MPI_Send(buff, 3, MPI_INT, i, 
 						RESTORE_TAG + itmax * env->err_shift, MPI_COMM_WORLD);
 			}
@@ -181,8 +184,8 @@ fixing_all(struct env *env, int err, int *rearrange_buff)
 int main(int argc, char **argv)
 {
 	srandom(time(NULL));
-    int bad_rank = random();
-	int bad_it = random() % itmax + 1;
+    int bad_rank = 6; //random();
+	int bad_it = 20; //random() % (itmax / 3) + 1;
 	
 	MPI_Init(&argc, &argv);
 	MPI_Comm_set_errhandler(MPI_COMM_WORLD, MPI_ERRORS_RETURN);
@@ -191,15 +194,16 @@ int main(int argc, char **argv)
 	e.err_shift = 1;
 	e.reread_it = -1;
 	int rearrange_buff[3];
-	MPI_Request request;
 
     MPI_Comm_size(MPI_COMM_WORLD, &e.size);
     MPI_Comm_rank(MPI_COMM_WORLD, &e.rank);
 
-	if (!(bad_rank % e.size))
-	{
+
+	bad_rank = bad_rank % e.size;
+	if (!bad_rank)
 		bad_rank++;
-	}
+	if (bad_rank == (e.size - 1))
+		bad_rank--;
 
 	if (!e.rank) 
 		printf("bad_it %d bad_rank %d\n", bad_it, bad_rank % e.size);
@@ -247,6 +251,15 @@ int main(int argc, char **argv)
 		int should_calculate = 1;
 	
 		MPI_Status status;
+		MPI_Request restore_request;
+		
+		rc = MPI_Irecv(&rearrange_buff, 3, MPI_INT, MPI_ANY_SOURCE,
+				RESTORE_TAG + itmax * e.err_shift, MPI_COMM_WORLD, &restore_request);
+		if (rc != MPI_SUCCESS) {
+			printf("%d get error on restore irecv \n", e.rank);
+			MPI_Abort(MPI_COMM_WORLD, MPI_ERR_FILE);
+		}
+
 //matrix initialized
 		if (e.ind_last != N - 2) 
 		{ //for last process next_values is always zero submatrix
@@ -271,7 +284,7 @@ int main(int argc, char **argv)
     	for (; e.it < itmax;) 
 		{
 			int restoring = 0;
-			if ((e.it == bad_it) && e.rank == (bad_rank % e.size))
+			if ((e.it == bad_it) && (e.rank == bad_rank))
 			{
 				// raise error
 				printf("On iteration %d process %d/%d decided to die.\n", e.it, e.rank, e.size);
@@ -281,18 +294,20 @@ int main(int argc, char **argv)
 			if (e.reread_it != -1)
 			{
 				// return to one of ther previous iterations
-				printf("Process %d rereading matrix for it %d\n", e.rank, e.reread_it);
+				printf("%d rereading matrix for it %d\n", e.rank, e.reread_it);
 				char *filename = (char *)calloc(sizeof(char), 100);
 				snprintf(filename, 100, "backup_%d_%d", e.rank, e.reread_it);
 				int fd = open(filename, O_RDONLY);
 				if (!fd)
 				{
-					printf("Proc %d can not open backup file for it %d\n", e.rank, e.reread_it);
+					printf("%d can not open backup file for it %d\n", e.rank, e.reread_it);
 					MPI_Abort(MPI_COMM_WORLD, MPI_ERR_FILE);
 				}
 				free(filename);
-				read(fd, matrix, N * N * (e.ind_last - e.ind_first + 2) * sizeof(double));
-				printf("Process %d restored and continuing work on it %d\n", e.rank, e.reread_it);
+				filename = NULL;
+				read(fd, matrix - N * N, N * N * (e.ind_last - e.ind_first + 2) * sizeof(double));
+				printf("%d restored and continuing work on it %d\n", e.rank, e.reread_it);
+				printf("%d ind_last = %d, ind_first= %d next_proc %d prev_proc %d \n", e.rank, e.ind_last, e.ind_first, e.next_proc, e.prev_proc);
 				e.it = e.reread_it;
 				e.reread_it = -1;
 				restoring = 1;
@@ -314,10 +329,10 @@ int main(int argc, char **argv)
                 	rc = MPI_Iprobe(process_id, MPI_ANY_TAG, MPI_COMM_WORLD, &flag, &status);
 					if (rc != MPI_SUCCESS)
 					{
-						printf("Process %d on it %d recieved not OK from source %d\n", e.rank, e.it, status.MPI_SOURCE);
+						printf("%d on it %d recieved not OK 1 from source %d\n", e.rank, e.it, status.MPI_SOURCE);
 						rearrange_buff[2] = 0;
 						rearrange_buff[0] = process_id;
-						fixing_all(&e, rc, rearrange_buff);
+						fixing_all(&e, rearrange_buff, &restore_request);
 						continue; // go to next iteration
 					}
 					
@@ -333,10 +348,10 @@ int main(int argc, char **argv)
                 	    	//message from queue
 							if (rc != MPI_SUCCESS)
 							{
-								printf("Process %d on it %d recieved not OK from %d\n", e.rank, e.it, process_id);
+								printf("%d on it %d recieved not OK 2 from %d\n", e.rank, e.it, process_id);
 								rearrange_buff[2] = 0;
 								rearrange_buff[0] = process_id;
-								fixing_all(&e, rc, rearrange_buff);
+								fixing_all(&e, rearrange_buff, &restore_request);
 								all_good = 0;
 								break;
 							}
@@ -345,10 +360,10 @@ int main(int argc, char **argv)
 						{
 		                    rc = MPI_Recv(&rearrange_buff, 3, MPI_INT, process_id, 
 									RESTORE_TAG + itmax * e.err_shift, MPI_COMM_WORLD, &status); 
-							printf("Process 0 recieve restore tag from process %d\n", process_id);
+							printf("0 recieve restore tag from process %d\n", process_id);
 							rearrange_buff[2] = 1;
 							rearrange_buff[0] = process_id;
-							fixing_all(&e, rc, rearrange_buff);
+							fixing_all(&e, rearrange_buff, &restore_request);
 							all_good = 0; //to go to next iteration
 						}
                 	} 
@@ -373,14 +388,14 @@ int main(int argc, char **argv)
 					{
 					   if (e.alive_procs[i])
 					   { 
-						   rc = MPI_Isend(&flag, 1, MPI_INT, i,
-								   EPS_TAG + itmax * e.err_shift, MPI_COMM_WORLD, &request);
+						   rc = MPI_Send(&flag, 1, MPI_INT, i,
+								   EPS_TAG + itmax * e.err_shift, MPI_COMM_WORLD);
 						   if (rc != MPI_SUCCESS)
 						   {
-							   printf("Process %d on it %d recieved not OK from proc %d\n", e.rank, e.it, i);
+							   printf("%d on it %d recieved not OK 3 from proc %d\n", e.rank, e.it, i);
    							   rearrange_buff[0] = i;
 							   rearrange_buff[2] = 0;
-							   fixing_all(&e, rc, rearrange_buff);
+							   fixing_all(&e, rearrange_buff, &restore_request);
    							   continue;
 						   }
 					   }
@@ -392,7 +407,7 @@ int main(int argc, char **argv)
             	rc = MPI_Iprobe(0, MPI_ANY_TAG, MPI_COMM_WORLD, &flag, &status);
 				if (rc != MPI_SUCCESS)
 				{
-					printf("Process %d on it %d recieved not from process 0\n", e.rank, e.it);
+					printf("%d on it %d recieved not from process 0\n", e.rank, e.it);
 					MPI_Abort(MPI_COMM_WORLD, MPI_ERR_FILE);
 				}	
 				if (flag) 
@@ -403,7 +418,7 @@ int main(int argc, char **argv)
 								EPS_TAG + itmax * e.err_shift, MPI_COMM_WORLD, &status);
 						if (rc != MPI_SUCCESS)
 						{
-							printf("Process %d on it %d recieved not OK from process 0\n", e.rank, e.it);
+							printf("%d on it %d recieved not OK 4  from process 0\n", e.rank, e.it);
 							MPI_Abort(MPI_COMM_WORLD, MPI_ERR_FILE);
 						}
                 		should_calculate = 0;
@@ -412,10 +427,10 @@ int main(int argc, char **argv)
 					{
 						rc = MPI_Recv(rearrange_buff, 3, MPI_INT, status.MPI_SOURCE, 
 							   	RESTORE_TAG + itmax * e.err_shift, MPI_COMM_WORLD, &status);
-						printf("Process %d revieved restore tag from proc %d\n", e.rank, status.MPI_SOURCE);
+						printf("%d revieved restore tag from proc %d\n", e.rank, status.MPI_SOURCE);
 						rearrange_buff[2] = 1;
 						rearrange_buff[0] = status.MPI_SOURCE;
-						fixing_all(&e, rc, rearrange_buff);
+						fixing_all(&e, rearrange_buff, &restore_request);
 					}	
            	 	}
         	}
@@ -425,40 +440,54 @@ int main(int argc, char **argv)
 			{ // process zero does not recieves data from other processes here
             //on first iteration left values could be counted by process itself
 				int go_to_next = 0;
-				printf("proc %d waiting for left data from proc %d on it %d with tag %d\n", 
+				MPI_Request data_request;
+				
+				rc = MPI_Irecv(matrix - N * N, N * N, MPI_DOUBLE,
+						e.prev_proc, e.it + itmax * (e.err_shift - 1), MPI_COMM_WORLD, &data_request);
+
+				if (rc != MPI_SUCCESS) {
+					printf("%d on it %d recieved not OK 5 when irecv from proc %d\n", e.rank, e.it, e.prev_proc);
+					rearrange_buff[2] = 0;
+					rearrange_buff[0] = e.prev_proc; 
+					fixing_all(&e, rearrange_buff, &restore_request);
+					continue;
+				}
+
+				printf("%d start waiting for left data from proc %d on it %d with tag %d\n", 
 						e.rank, e.prev_proc, e.it, e.it + itmax * (e.err_shift - 1));
+			
 				while (1) {
-					// если есть сообщение о восстановлении, берем его и идем на следующий цикл 
-            		rc = MPI_Iprobe(MPI_ANY_SOURCE, RESTORE_TAG + itmax * e.err_shift, MPI_COMM_WORLD, &flag, &status);
-					if (flag) {
-						MPI_Recv(&rearrange_buff, 3, MPI_INT, status.MPI_SOURCE, status.MPI_TAG, MPI_COMM_WORLD, &status);
-						fixing_all(&e, rc, rearrange_buff);
-						go_to_next = 1;
-						break;
-					}
-					// иначе должно быть сообщение от другого процесса, пока его нет, повторяем ожидание
-					rc = MPI_Iprobe(e.prev_proc, e.it + itmax * (e.err_shift - 1), MPI_COMM_WORLD, &flag, &status);	
-					if (rc != MPI_SUCCESS)
-					{
-						printf("Process %d on it %d recieved not OK from proc %d\n", e.rank, e.it, e.prev_proc);
-						rearrange_buff[2] = 0;
-						rearrange_buff[0] = e.prev_proc; 
-						fixing_all(&e, rc, rearrange_buff);
-						go_to_next = 1;
-						break;
-					}
-					if (flag) {
-						rc = MPI_Recv(matrix - N * N, N * N, MPI_DOUBLE, 
-							e.prev_proc, e.it + itmax * (e.err_shift - 1), MPI_COMM_WORLD, &status);
-						if (rc != MPI_SUCCESS)
-						{
-							printf("Process %d on it %d recieved not OK from proc %d\n", e.rank, e.it, e.prev_proc);
-							rearrange_buff[2] = 0;
-							rearrange_buff[0] = e.prev_proc; 
-							fixing_all(&e, rc, rearrange_buff);
+					int get_restore;
+					int get_data;
+					if (e.err_shift == 1) {
+						rc = MPI_Request_get_status(restore_request, &get_restore, &status);
+						if (rc != MPI_SUCCESS) {
+							printf("%d error on get_status for left\n", e.rank);
+							MPI_Abort(MPI_COMM_WORLD, MPI_ERR_FILE);
+						}
+
+						if (get_restore) { // получено сообщение о восстановлении
+							printf("%d recieved restore message from proc %d\n", e.rank, status.MPI_SOURCE);
+							MPI_Cancel(&data_request);
+							fixing_all(&e, rearrange_buff, &restore_request);
 							go_to_next = 1;
 							break;
 						}
+					}
+
+					rc = MPI_Request_get_status(data_request, &get_data, &status);
+					MPI_Request_free(&data_request);
+					if (rc != MPI_SUCCESS) {
+						printf("%d on it %d recieved not OK 6 when get_status on left datafrom proc %d\n", e.rank, e.it, e.prev_proc);
+						rearrange_buff[2] = 0;
+						rearrange_buff[0] = e.prev_proc; 
+						fixing_all(&e, rearrange_buff, &restore_request);
+						go_to_next = 1;
+						break;
+					}
+					if (get_data) {
+						printf("%d recieved left data from proc %d on it %d with tag %d\n",
+							e.rank, e.prev_proc, e.it, e.it + itmax * (e.err_shift - 1));
 						break;
 					}
 				}
@@ -467,46 +496,52 @@ int main(int argc, char **argv)
 					continue;
 				}
 			}
-			printf("proc %d recieved left data from proc %d on it %d with tag %d\n", 
-					e.rank, e.prev_proc, e.it, e.it + itmax * (e.err_shift - 1));
+
         	if ((e.it && !restoring) && e.rank != e.size - 1) 
 			{ // on first iteration next_values is already correct,
             //for last process next_values is ALWAYS correct
 				int go_to_next = 0;
-				printf("proc %d waiting for right data from proc %d on it %d with tag %d\n", 
+				printf("%d waiting for right data from proc %d on it %d with tag %d\n", 
 						e.rank, e.next_proc, e.it - 1, e.it - 1 + itmax * (e.err_shift - 1));
+				MPI_Request data_request;
+				
+				rc = MPI_Irecv(matrix + N * N * (e.ind_last - e.ind_first), N * N, MPI_DOUBLE, 
+							e.next_proc, e.it - 1 + itmax * (e.err_shift - 1), MPI_COMM_WORLD, &data_request);
+				if (rc != MPI_SUCCESS)
+				{
+					printf("%d on it %d recieved not OK 7 from proc %d\n", e.rank, e.it, e.next_proc);
+					rearrange_buff[2] = 0;
+					rearrange_buff[0] = e.next_proc; 
+					fixing_all(&e, rearrange_buff, &restore_request);
+					continue;
+				}
 				while (1) {
-					// если есть сообщение о восстановлении, берем его и идем на следующий цикл 
-            		rc = MPI_Iprobe(MPI_ANY_SOURCE, RESTORE_TAG + itmax * e.err_shift, MPI_COMM_WORLD, &flag, &status);
-					if (flag) {
-						MPI_Recv(&rearrange_buff, 3, MPI_INT, status.MPI_SOURCE, status.MPI_TAG, MPI_COMM_WORLD, &status);
-						fixing_all(&e, rc, rearrange_buff);
-						go_to_next = 1;
-						break;
-					}
-					// иначе должно быть сообщение от другого процесса, пока его нет, повторяем ожидание
-					rc = MPI_Iprobe(e.next_proc, e.it - 1 + itmax * (e.err_shift - 1), MPI_COMM_WORLD, &flag, &status);	
-					if (rc != MPI_SUCCESS)
-					{
-						printf("Process %d on it %d recieved not OK from proc %d 496\n", e.rank, e.it, e.next_proc);
-						rearrange_buff[2] = 0;
-						rearrange_buff[0] = e.next_proc; 
-						fixing_all(&e, rc, rearrange_buff);
-						go_to_next = 1;
-						break;
-					}
-					if (flag) {
-            			rc = MPI_Recv(matrix + N * N * (e.ind_last - e.ind_first), N * N, MPI_DOUBLE, 
-							e.next_proc, e.it - 1 + itmax * (e.err_shift - 1), MPI_COMM_WORLD, &status);
-						if (rc != MPI_SUCCESS)
-						{
-							printf("Process %d on it %d recieved not OK from proc %d 508\n", e.rank, e.it, e.next_proc);
-							rearrange_buff[2] = 0;
-							rearrange_buff[0] = e.next_proc; 
-							fixing_all(&e, rc, rearrange_buff);
+					int get_restore;
+					int get_data;
+					if (e.err_shift == 1) {
+						rc = MPI_Request_get_status(restore_request, &get_restore, &status);
+						if (get_restore) { // получено сообщение о восстановлении
+							printf("%d recieved restore message from proc %d\n", e.rank, status.MPI_SOURCE);
+							MPI_Cancel(&data_request);
+							fixing_all(&e, rearrange_buff, &restore_request);
 							go_to_next = 1;
 							break;
 						}
+					}
+
+					rc = MPI_Request_get_status(data_request, &get_data, &status);
+					MPI_Request_free(&data_request);
+					if (rc != MPI_SUCCESS) {
+						printf("%d on it %d recieved not OK 8 when get_status on right data from proc %d\n", e.rank, e.it, e.next_proc);
+						rearrange_buff[2] = 0;
+						rearrange_buff[0] = e.next_proc; 
+						fixing_all(&e, rearrange_buff, &restore_request);
+						go_to_next = 1;
+						break;
+					}
+					if (get_data) {
+						printf("%d recieved right data from proc %d on it %d with tag %d\n", 
+							e.rank, e.next_proc, e.it - 1, e.it - 1 + itmax * (e.err_shift - 1));
 						break;
 					}
 				}
@@ -515,8 +550,6 @@ int main(int argc, char **argv)
 					continue;
 				}
         	}
-			printf("proc %d recieved right data from proc %d on it %d with tag %d\n", 
-					e.rank, e.prev_proc, e.it - 1, e.it - 1 + itmax * (e.err_shift - 1));
         // process values
         	eps = 0;
         	if (should_calculate) 
@@ -540,38 +573,39 @@ int main(int argc, char **argv)
 			int fd = open(filename, O_CREAT, S_IRWXU);
 		    if (!fd)
 			{
-				fprintf(stderr, "Process %d can not create and open file %s\n", e.rank, filename);
+				fprintf(stderr, "%d can not create and open file %s\n", e.rank, filename);
 				MPI_Abort(MPI_COMM_WORLD, MPI_ERR_FILE);
 			}	
 			free(filename);
+			filename = NULL;
 			write(fd, matrix, N * N * (e.ind_last - e.ind_first + 2) * sizeof(double));
 			close(fd);
-			printf("Process %d ended it %d\n", e.rank, e.it);
+			printf("%d ended it %d\n", e.rank, e.it);
 			// end of backup counted messages
 
-			if (e.rank != e.size - 1)
+			if (e.ind_last != N - 2)
 			{
-				printf("Proc %d sending message to %d with tag %d\n", e.rank, e.next_proc, e.it + itmax * (e.err_shift - 1));
-    	        rc = MPI_Isend(matrix + (e.ind_last - e.ind_first - 1) * N * N, N * N, MPI_DOUBLE, e.next_proc, e.it + itmax * (e.err_shift - 1), MPI_COMM_WORLD, &request);
+				printf("%d sending message to %d with tag %d\n", e.rank, e.next_proc, e.it + itmax * (e.err_shift - 1));
+    	        rc = MPI_Send(matrix + (e.ind_last - e.ind_first - 1) * N * N, N * N, MPI_DOUBLE, e.next_proc, e.it + itmax * (e.err_shift - 1), MPI_COMM_WORLD);
 				if (rc != MPI_SUCCESS)
 				{
-					printf("Process %d on it %d recieved not OK from proc %d\n", e.rank, e.it, e.next_proc);
+					printf("%d on it %d recieved not OK 9 from proc %d\n", e.rank, e.it, e.next_proc);
 					rearrange_buff[0] = e.next_proc;
 					rearrange_buff[2] = 0;
-					fixing_all(&e, rc, rearrange_buff);
+					fixing_all(&e, rearrange_buff, &restore_request);
 					continue;
 				}
 			}
         	if (e.rank && e.it != itmax - 1)
 			{
-				printf("Proc %d sending message to %d with tag %d\n", e.rank, e.prev_proc, e.it + itmax * (e.err_shift - 1));
-            	rc = MPI_Isend(matrix, N * N, MPI_DOUBLE, e.prev_proc, e.it + itmax * (e.err_shift - 1), MPI_COMM_WORLD, &request);
+				printf("%d sending message to %d with tag %d\n", e.rank, e.prev_proc, e.it + itmax * (e.err_shift - 1));
+            	rc = MPI_Send(matrix, N * N, MPI_DOUBLE, e.prev_proc, e.it + itmax * (e.err_shift - 1), MPI_COMM_WORLD);
 				if (rc != MPI_SUCCESS)
 				{
-					printf("Process %d on it %d recieved not OK from proc %d\n", e.rank, e.it, e.prev_proc);
+					printf("%d on it %d recieved not OK 10 from proc %d\n", e.rank, e.it, e.prev_proc);
 					rearrange_buff[0] = e.prev_proc;
 					rearrange_buff[2] = 0;
-					fixing_all(&e, rc, rearrange_buff);
+					fixing_all(&e, rearrange_buff, &restore_request);
 					continue;
 				}				
 			}
@@ -590,7 +624,7 @@ int main(int argc, char **argv)
                 		rc = MPI_Send(&achieved, 1, MPI_INT, 0, EPS_TAG + itmax * e.err_shift, MPI_COMM_WORLD);
 						if (rc != MPI_SUCCESS)
 						{
-							printf("Process %d on it %d recieved not OK from proc 0 (this is strange 3)\n", e.rank, e.it);
+							printf("%d on it %d recieved not OK 11 from proc 0 (this is strange 3)\n", e.rank, e.it);
 							MPI_Abort(MPI_COMM_WORLD, MPI_ERR_FILE);
 						}
             		}
@@ -600,7 +634,7 @@ int main(int argc, char **argv)
 		}
 //now we should sum all counted values and sent them to process 0
 //process 0 should sum all recieved values and print them
-    
+   		printf("%d ended iteration\n", e.rank); 
 	    double S = 0.;
    	 	for (ind1 = 0; ind1 < e.ind_last - e.ind_first; ind1++)
 		{
@@ -614,11 +648,14 @@ int main(int argc, char **argv)
     	}
     	if (e.rank)
 		{
+			printf("%d sending result to 0\n", e.rank);
         	rc = MPI_Send(&S, 1, MPI_DOUBLE, 0, END_TAG + itmax * e.err_shift, MPI_COMM_WORLD);
+			printf("%d sended result\n", e.rank);
     	}
 
     	if (!e.rank)
 		{
+			printf("0 start recieveing results\n");
         	double S_tmp;
         	for (ind1 = 1; ind1 < e.size; ind1++)
 			{
@@ -626,8 +663,10 @@ int main(int argc, char **argv)
 				{
 					continue;
 				}
+				printf("0 recieveing recult from %d\n", ind1);
             	rc = MPI_Recv(&S_tmp, 1, MPI_DOUBLE, ind1, 
 						END_TAG + itmax * e.err_shift, MPI_COMM_WORLD, &status);
+				printf("0 got result from %d = %lf\n", ind1, S_tmp);
             	S += S_tmp;
         	}
     	}
