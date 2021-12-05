@@ -40,7 +40,6 @@ struct env
 void
 fixing_all(struct env *env, int *rearrange_buff, MPI_Request *prev_master_request)
 {
-	printf("In fixing_all proc %d/%d on it %d\n", env->rank, env->size, env->it);
 	int dead_proc = rearrange_buff[0];
 	int is_slave = rearrange_buff[2];
 	int buff[3];
@@ -186,8 +185,8 @@ fixing_all(struct env *env, int *rearrange_buff, MPI_Request *prev_master_reques
 int main(int argc, char **argv)
 {
 	srandom(time(NULL));
-    int bad_rank = 6; //random();
-	int bad_it = 20; //random() % (itmax / 3) + 1;
+    int bad_rank = random();
+	int bad_it = random() % (itmax / 3) + 1;
 	
 	MPI_Init(&argc, &argv);
 	MPI_Comm_set_errhandler(MPI_COMM_WORLD, MPI_ERRORS_RETURN);
@@ -454,16 +453,12 @@ int main(int argc, char **argv)
 					continue;
 				}
 
-				printf("%d start waiting for left data from proc %d on it %d with tag %d\n", 
-						e.rank, e.prev_proc, e.it, e.it + itmax * (e.err_shift - 1));
-			
 				while (1) {
 					int get_restore;
 					int get_data;
 					if (e.err_shift == 1) {
 						rc = MPI_Request_get_status(restore_request, &get_restore, &status);
 						if (rc != MPI_SUCCESS) {
-							printf("%d error on get_status for left\n", e.rank);
 							MPI_Abort(MPI_COMM_WORLD, MPI_ERR_FILE);
 						}
 
@@ -487,8 +482,6 @@ int main(int argc, char **argv)
 						break;
 					}
 					if (get_data) {
-						printf("%d recieved left data from proc %d on it %d with tag %d\n",
-							e.rank, e.prev_proc, e.it, e.it + itmax * (e.err_shift - 1));
 						break;
 					}
 				}
@@ -502,8 +495,6 @@ int main(int argc, char **argv)
 			{ // on first iteration next_values is already correct,
             //for last process next_values is ALWAYS correct
 				int go_to_next = 0;
-				printf("%d waiting for right data from proc %d on it %d with tag %d\n", 
-						e.rank, e.next_proc, e.it - 1, e.it - 1 + itmax * (e.err_shift - 1));
 				MPI_Request data_request;
 				
 				rc = MPI_Irecv(matrix + N * N * (e.ind_last - e.ind_first), N * N, MPI_DOUBLE, 
@@ -541,8 +532,6 @@ int main(int argc, char **argv)
 						break;
 					}
 					if (get_data) {
-						printf("%d recieved right data from proc %d on it %d with tag %d\n", 
-							e.rank, e.next_proc, e.it - 1, e.it - 1 + itmax * (e.err_shift - 1));
 						break;
 					}
 				}
@@ -581,12 +570,10 @@ int main(int argc, char **argv)
 			filename = NULL;
 			write(fd, matrix - N * N, N * N * (e.ind_last - e.ind_first + 2) * sizeof(double));
 			close(fd);
-			printf("%d ended it %d\n", e.rank, e.it);
 			// end of backup counted messages
 
 			if (e.ind_last != N - 2)
 			{
-				printf("%d sending message to %d with tag %d\n", e.rank, e.next_proc, e.it + itmax * (e.err_shift - 1));
     	        rc = MPI_Send(matrix + (e.ind_last - e.ind_first - 1) * N * N, N * N, MPI_DOUBLE, e.next_proc, e.it + itmax * (e.err_shift - 1), MPI_COMM_WORLD);
 				if (rc != MPI_SUCCESS)
 				{
@@ -599,7 +586,6 @@ int main(int argc, char **argv)
 			}
         	if (e.rank && e.it != itmax - 1)
 			{
-				printf("%d sending message to %d with tag %d\n", e.rank, e.prev_proc, e.it + itmax * (e.err_shift - 1));
             	rc = MPI_Send(matrix, N * N, MPI_DOUBLE, e.prev_proc, e.it + itmax * (e.err_shift - 1), MPI_COMM_WORLD);
 				if (rc != MPI_SUCCESS)
 				{
@@ -635,7 +621,6 @@ int main(int argc, char **argv)
 		}
 //now we should sum all counted values and sent them to process 0
 //process 0 should sum all recieved values and print them
-   		printf("%d ended iteration\n", e.rank); 
 	    double S = 0.;
    	 	for (ind1 = 0; ind1 < e.ind_last - e.ind_first; ind1++)
 		{
@@ -649,14 +634,11 @@ int main(int argc, char **argv)
     	}
     	if (e.rank)
 		{
-			printf("%d sending result to 0\n", e.rank);
         	rc = MPI_Send(&S, 1, MPI_DOUBLE, 0, END_TAG + itmax * e.err_shift, MPI_COMM_WORLD);
-			printf("%d sended result\n", e.rank);
     	}
 
     	if (!e.rank)
 		{
-			printf("0 start recieveing results\n");
         	double S_tmp;
         	for (ind1 = 1; ind1 < e.size; ind1++)
 			{
@@ -664,10 +646,8 @@ int main(int argc, char **argv)
 				{
 					continue;
 				}
-				printf("0 recieveing recult from %d\n", ind1);
             	rc = MPI_Recv(&S_tmp, 1, MPI_DOUBLE, ind1, 
 						END_TAG + itmax * e.err_shift, MPI_COMM_WORLD, &status);
-				printf("0 got result from %d = %lf\n", ind1, S_tmp);
             	S += S_tmp;
         	}
     	}
@@ -677,8 +657,8 @@ int main(int argc, char **argv)
     	}
     	free(matrix - N * N);
     }
-	//if (!e.rank)
-	//	while (1);
+	if (!e.rank)
+		while (1);
     MPI_Finalize();
 	return 0;
 }
